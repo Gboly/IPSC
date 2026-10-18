@@ -31,6 +31,24 @@ npm test                                # 22 tests: physics, mass balance, game 
 * First start generates the synthetic history if `server/data/k17_v1.json` is missing (~40 s, deterministic by seed).
   The generated file ships in the zip.
 
+## Deploy on Vercel (two projects)
+
+| Project | Root Directory | Framework preset | Notes |
+|---|---|---|---|
+| Backend (`ipsc-backend.vercel.app`) | `server` | Other | `server/vercel.json` sends every request to `api/index.js` (the Express app) and bundles `data/k17_v1.json`. |
+| Frontend (`ipsc-alpha.vercel.app`) | `client` | Vite | `client/vercel.json` proxies `/api/*` to the backend, so the browser talks to one origin (no CORS). Change the URL there if the backend moves. |
+
+Backend environment variables (Project → Settings → Environment Variables):
+
+* **Session storage (required for real use):** add an Upstash Redis store from the Vercel Marketplace (Storage tab) and connect
+  it to the backend project; it sets `KV_REST_API_URL` / `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_URL` / `_TOKEN`).
+  Without it the server falls back to `/tmp`, which Vercel wipes whenever it recycles the function: progress disappears.
+  `/api/health` reports `"storage": "redis" | "file" | "ephemeral"` and the UI shows a warning in the ephemeral case.
+* `ANTHROPIC_API_KEY` (and optionally `CLAUDE_MODEL`) for the live reviewer.
+
+Check the backend with `https://<backend>/api/health`, and the frontend wiring with `https://<frontend>/api/health`
+(it should return the same JSON through the proxy).
+
 ## Architecture
 
 ```

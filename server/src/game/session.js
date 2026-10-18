@@ -1,5 +1,12 @@
-// File-backed session store and game rules (XP, gates, achievements, state record).
+// Session store and game rules (XP, gates, achievements, state record).
+//
+// Storage backends (picked from the environment, see storageMode()):
+//   redis     - Upstash Redis REST API (KV_REST_API_URL/TOKEN or UPSTASH_REDIS_REST_URL/TOKEN). Use this on Vercel.
+//   file      - JSON files in K17_SESSION_DIR or server/data/sessions (local development, tests).
+//   ephemeral - JSON files in /tmp on a serverless host with no Redis configured: works, but sessions are lost
+//               whenever the function instance is recycled. /api/health reports this so the UI can warn.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -7,12 +14,33 @@ import { STAGES, STAGE_BY_ID, TASK_BY_ID, ACHIEVEMENTS } from './stages.js';
 import { packIdsForStage } from './packs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIR = process.env.K17_SESSION_DIR || path.join(__dirname, '../../data/sessions');
-fs.mkdirSync(DIR, { recursive: true });
+const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+const SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 
-const file = (id) => path.join(DIR, `${id.replace(/[^a-z0-9-]/gi, '')}.json`);
+export function storageMode() {
+  if (REDIS_URL && REDIS_TOKEN) return 'redis';
+  return SERVERLESS && !process.env.K17_SESSION_DIR ? 'ephemeral' : 'file';
+}
 
-export function createSession() {
+const cleanId = (id) => String(id).replace(/[^a-z0-9-]/gi, '');
+
+async function redis(cmd) {
+  const r = await fetch(REDIS_URL, { method: 'POST', headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify(cmd) });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok || body.error) throw new Error(`Session store error: ${body.error || r.status}`);
+  return body.result;
+}
+
+let dirReady = false;
+function sessionDir() {
+  const dir = process.env.K17_SESSION_DIR || (storageMode() === 'ephemeral' ? path.join(os.tmpdir(), 'k17-sessions') : path.join(__dirname, '../../data/sessions'));
+  if (!dirReady) { fs.mkdirSync(dir, { recursive: true }); dirReady = true; }
+  return dir;
+}
+const file = (id) => path.join(sessionDir(), `${cleanId(id)}.json`);
+
+export async function createSession() {
   const id = crypto.randomUUID();
   const s = {
     id, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -22,11 +50,15 @@ export function createSession() {
     drafts: {}, submissions: {}, taskStatus: {}, hints: {},
     decisions: [], notebook: { notes: '', calcs: [] }, chat: [], calcChecks: [],
   };
-  save(s);
+  await save(s);
   return s;
 }
 
-export function loadSession(id) {
+export async function loadSession(id) {
+  if (storageMode() === 'redis') {
+    const raw = await redis(['GET', `k17:session:${cleanId(id)}`]);
+    return raw ? JSON.parse(raw) : null;
+  }
   try {
     return JSON.parse(fs.readFileSync(file(id), 'utf8'));
   } catch {
@@ -34,16 +66,10 @@ export function loadSession(id) {
   }
 }
 
-export function save(s) {
+export async function save(s) {
   s.updatedAt = new Date().toISOString();
-  fs.writeFileSync(file(s.id), JSON.stringify(s, null, 2));
-}
-
-export function listSessions() {
-  return fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => {
-    const s = JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8'));
-    return { id: s.id, updatedAt: s.updatedAt, xp: s.xp, currentStage: s.currentStage };
-  }).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  if (storageMode() === 'redis') await redis(['SET', `k17:session:${cleanId(s.id)}`, JSON.stringify(s)]);
+  else fs.writeFileSync(file(s.id), JSON.stringify(s, null, 2));
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -53,7 +53,7 @@ export default function App() {
     try { const r = await api.complete(session.id, stid); setSummary(r.summary); setSession(r.session); setViewStage(r.session.currentStage); } catch (e) { toastMsg(e.message); }
   };
 
-  if (fatal) return <div className="main"><div className="err">Cannot reach the server: {fatal}. Is <code>npm run dev</code> running?</div></div>;
+  if (fatal) return <div className="main"><div className="err">Cannot reach the game server: {fatal}. Locally, check that <code>npm run dev</code> is running; on a hosted site, check that the backend deployment is up and that <code>/api</code> requests reach it.</div></div>;
   if (!camp || !session) return <div className="main muted">Loading campaign…</div>;
 
   const stage = camp.stages.find((s) => s.id === (viewStage || session.currentStage));
@@ -70,6 +70,7 @@ export default function App() {
           <span className="chip info">Stage {session.currentStage.replace('S', '')} of 16</span>
           <span className="spacer" />
           <span className={'chip ' + (health.ai === 'live' ? 'ok' : 'bad')} title={health.ai === 'live' ? 'Reviews, hints and chat are generated live by Claude' : 'No ANTHROPIC_API_KEY on the server: keyword rubric only'}>{health.ai === 'live' ? `AI live · ${health.model}` : 'AI OFFLINE · keyword rubric'}</span>
+          {health.storage === 'ephemeral' && <span className="chip bad" title="The server has no persistent session store configured, so progress can disappear at any time. Configure Redis (Upstash) on the backend.">Progress not saved permanently</span>}
           <span className="chip accent" title="Experience points: a motivational device, not a competency certificate">XP <span className="xp">{session.xp}</span></span>
           <button className="btn sm" onClick={newCampaign}>New campaign</button>
         </header>

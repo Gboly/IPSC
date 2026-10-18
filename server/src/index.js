@@ -19,35 +19,35 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
 const DEV_UNLOCK = process.env.DEV_UNLOCK_ALL === '1';
-const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
+// Promise.resolve().then() so errors thrown synchronously also become JSON responses, not Express HTML pages.
+const wrap = (fn) => (req, res) => Promise.resolve().then(() => fn(req, res)).catch((e) => {
   console.error('[err]', req.method, req.path, e.message);
   res.status(e.status || 500).json({ error: e.message });
 });
-const sess = (req) => {
-  const s = S.loadSession(req.params.sid);
+const sess = async (req) => {
+  const s = await S.loadSession(req.params.sid);
   if (!s) throw Object.assign(new Error('Unknown session'), { status: 404 });
   return s;
 };
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, ai: aiMode(), model: MODEL, devUnlock: DEV_UNLOCK, banner: BANNER }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, ai: aiMode(), model: MODEL, devUnlock: DEV_UNLOCK, storage: S.storageMode(), banner: BANNER }));
 
 app.get('/api/campaign', (_req, res) => res.json({ banner: BANNER, levels: LEVELS, achievements: ACHIEVEMENTS, stages: STAGES.map(publicStage), metrics: METRICS, packs: packIndex() }));
 
 // ----------------------------------------------------------------------------- sessions
-app.get('/api/sessions', (_req, res) => res.json(S.listSessions()));
-app.post('/api/sessions', wrap((_req, res) => res.json(S.publicSession(S.createSession()))));
-app.get('/api/sessions/:sid', wrap((req, res) => res.json(S.publicSession(sess(req)))));
+app.post('/api/sessions', wrap(async (_req, res) => res.json(S.publicSession(await S.createSession()))));
+app.get('/api/sessions/:sid', wrap(async (req, res) => res.json(S.publicSession(await sess(req)))));
 
 // ----------------------------------------------------------------------------- data room
-app.get('/api/sessions/:sid/packs/:pid', wrap((req, res) => {
-  const s = sess(req);
+app.get('/api/sessions/:sid/packs/:pid', wrap(async (req, res) => {
+  const s = await sess(req);
   if (!DEV_UNLOCK && !S.packsVisible(s).includes(req.params.pid)) return res.status(403).json({ error: 'This pack has not been released yet.' });
   const p = getPack(req.params.pid);
   if (!p) return res.status(404).json({ error: 'Unknown pack' });
   res.json(p);
 }));
-app.get('/api/sessions/:sid/packs/:pid/files/:file', wrap((req, res) => {
-  const s = sess(req);
+app.get('/api/sessions/:sid/packs/:pid/files/:file', wrap(async (req, res) => {
+  const s = await sess(req);
   if (!DEV_UNLOCK && !S.packsVisible(s).includes(req.params.pid)) return res.status(403).json({ error: 'This pack has not been released yet.' });
   const csv = getPackCsv(req.params.pid, req.params.file);
   if (csv === null) return res.status(404).json({ error: 'Unknown file' });
@@ -55,16 +55,16 @@ app.get('/api/sessions/:sid/packs/:pid/files/:file', wrap((req, res) => {
 }));
 
 // ----------------------------------------------------------------------------- tasks
-app.put('/api/sessions/:sid/tasks/:tid/draft', wrap((req, res) => {
-  const s = sess(req);
+app.put('/api/sessions/:sid/tasks/:tid/draft', wrap(async (req, res) => {
+  const s = await sess(req);
   if (!TASK_BY_ID[req.params.tid]) return res.status(404).json({ error: 'Unknown task' });
   s.drafts[req.params.tid] = req.body.answer || {};
-  S.save(s);
+  await S.save(s);
   res.json({ ok: true });
 }));
 
 app.post('/api/sessions/:sid/tasks/:tid/submit', wrap(async (req, res) => {
-  const s = sess(req);
+  const s = await sess(req);
   const task = TASK_BY_ID[req.params.tid];
   if (!task) return res.status(404).json({ error: 'Unknown task' });
   const stage = STAGE_BY_ID[task.stageId];
@@ -90,7 +90,7 @@ app.post('/api/sessions/:sid/tasks/:tid/submit', wrap(async (req, res) => {
   const { gained, passed } = S.applyReview(s, task, review);
   (s.submissions[task.id] ||= []).push({ at: new Date().toISOString(), answer, aiMode: aiMode(), decisionQuality: review.decision_quality, feedback: review.feedback, gained: gained.map((g) => g.id) });
   S.logDecision(s, task, answerText, review);
-  S.save(s);
+  await S.save(s);
 
   // Only unfound-issue counts leak, never identities.
   const remaining = task.rubric.filter((c) => c.id.startsWith('DQ-') && !s.met[c.id]).length;
@@ -103,7 +103,7 @@ app.post('/api/sessions/:sid/tasks/:tid/submit', wrap(async (req, res) => {
 }));
 
 app.post('/api/sessions/:sid/tasks/:tid/hint', wrap(async (req, res) => {
-  const s = sess(req);
+  const s = await sess(req);
   const task = TASK_BY_ID[req.params.tid];
   if (!task) return res.status(404).json({ error: 'Unknown task' });
   const level = Math.min(3, (s.hints[task.id] || 0) + 1);
@@ -118,13 +118,13 @@ app.post('/api/sessions/:sid/tasks/:tid/hint', wrap(async (req, res) => {
       return res.status(502).json({ error: `Hint failed: ${e.message}` });
     }
   } else hint = offlineHint(level);
-  S.save(s);
+  await S.save(s);
   res.json({ level, hint, aiMode: aiMode() });
 }));
 
 // ----------------------------------------------------------------------------- calculations
-app.post('/api/sessions/:sid/calc/check', wrap((req, res) => {
-  const s = sess(req);
+app.post('/api/sessions/:sid/calc/check', wrap(async (req, res) => {
+  const s = await sess(req);
   const r = checkMetric(req.body);
   if (r.error) return res.status(400).json(r);
   s.calcChecks.push({ at: new Date().toISOString(), ...r, expected: undefined });
@@ -137,12 +137,12 @@ app.post('/api/sessions/:sid/calc/check', wrap((req, res) => {
     s.xp += xp;
     s.xpLog.push({ at: new Date().toISOString(), task: 'calc', criterion: key, xp });
   }
-  S.save(s);
+  await S.save(s);
   res.json({ ...r, xp });
 }));
 
-app.post('/api/sessions/:sid/calc/event-loss', wrap((req, res) => {
-  const s = sess(req);
+app.post('/api/sessions/:sid/calc/event-loss', wrap(async (req, res) => {
+  const s = await sess(req);
   if (!DEV_UNLOCK && S.stageIndex(s.currentStage) < S.stageIndex('S4')) return res.status(403).json({ error: 'Pack 06 is not released yet.' });
   const r = checkEventLoss(req.body);
   if (r.error) return res.status(400).json(r);
@@ -155,23 +155,23 @@ app.post('/api/sessions/:sid/calc/event-loss', wrap((req, res) => {
     s.xpLog.push({ at: new Date().toISOString(), task: 'calc', criterion: key, xp });
   }
   s.calcChecks.push({ at: new Date().toISOString(), metric: 'event_loss', ...r });
-  S.save(s);
+  await S.save(s);
   res.json({ ...r, xp });
 }));
 
 app.get('/api/sessions/:sid/calc/metrics', (_req, res) => res.json(METRICS));
 
 // ----------------------------------------------------------------------------- notebook / chat / export
-app.put('/api/sessions/:sid/notebook', wrap((req, res) => {
-  const s = sess(req);
+app.put('/api/sessions/:sid/notebook', wrap(async (req, res) => {
+  const s = await sess(req);
   s.notebook.notes = String(req.body.notes ?? s.notebook.notes).slice(0, 50000);
   if (Array.isArray(req.body.calcs)) s.notebook.calcs = req.body.calcs.slice(-200);
-  S.save(s);
+  await S.save(s);
   res.json({ ok: true });
 }));
 
 app.post('/api/sessions/:sid/chat', wrap(async (req, res) => {
-  const s = sess(req);
+  const s = await sess(req);
   const message = String(req.body.message || '').slice(0, 4000);
   if (!message.trim()) return res.status(400).json({ error: 'Empty message' });
   let reply;
@@ -184,22 +184,22 @@ app.post('/api/sessions/:sid/chat', wrap(async (req, res) => {
     }
   } else reply = '_Offline mode: set `ANTHROPIC_API_KEY` in `.env` to talk to the supervisor._';
   s.chat.push({ role: 'user', content: message }, { role: 'assistant', content: reply });
-  S.save(s);
+  await S.save(s);
   res.json({ reply, chat: s.chat.slice(-40) });
 }));
-app.get('/api/sessions/:sid/chat', wrap((req, res) => res.json(sess(req).chat.slice(-40))));
+app.get('/api/sessions/:sid/chat', wrap(async (req, res) => res.json((await sess(req)).chat.slice(-40))));
 
-app.get('/api/sessions/:sid/state-record', wrap((req, res) => {
-  const s = sess(req);
+app.get('/api/sessions/:sid/state-record', wrap(async (req, res) => {
+  const s = await sess(req);
   res.type('application/json').set('Content-Disposition', 'attachment; filename="k17-state-record.json"').send(JSON.stringify(S.stateRecord(s), null, 2));
 }));
 
-app.post('/api/sessions/:sid/stages/:stid/complete', wrap((req, res) => {
-  const s = sess(req);
+app.post('/api/sessions/:sid/stages/:stid/complete', wrap(async (req, res) => {
+  const s = await sess(req);
   if (s.currentStage !== req.params.stid) return res.status(400).json({ error: 'That is not your current stage.' });
   try {
     const summary = S.completeStage(s, req.params.stid);
-    S.save(s);
+    await S.save(s);
     res.json({ summary, session: S.publicSession(s) });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -207,8 +207,8 @@ app.post('/api/sessions/:sid/stages/:stid/complete', wrap((req, res) => {
 }));
 
 // ----------------------------------------------------------------------------- workbench: nodal (gated to Stage 5+)
-app.post('/api/sessions/:sid/workbench/nodal', wrap((req, res) => {
-  const s = sess(req);
+app.post('/api/sessions/:sid/workbench/nodal', wrap(async (req, res) => {
+  const s = await sess(req);
   if (!DEV_UNLOCK && S.stageIndex(s.currentStage) < S.stageIndex('S5')) return res.status(403).json({ error: 'The nodal workbench unlocks at Stage 5 (well performance).' });
   const { well, date = '2026-09-30', chokeS, manifoldPsig = 170, restriction, jMult } = req.body;
   const w = WELLS.find((x) => x.id === well);
@@ -228,7 +228,12 @@ const dist = path.join(__dirname, '../../client/dist');
 if (fs.existsSync(dist)) {
   app.use(express.static(dist));
   app.get(/^(?!\/api).*/, (_req, res) => res.sendFile(path.join(dist, 'index.html')));
+} else {
+  // API-only deployment (e.g. the backend project on Vercel): say so instead of "Cannot GET /".
+  app.get('/', (_req, res) => res.json({ ok: true, service: 'K-17 IPSC API', health: '/api/health' }));
 }
+
+export default app;
 
 const PORT = process.env.PORT || 8787;
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

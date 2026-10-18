@@ -8,8 +8,15 @@ export function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
     console.log('[k17] data file missing - generating (about a minute)...');
     const out = generate({ verbose: false });
-    fs.mkdirSync(DATA_FILE.replace(/[^/\\]+$/, ''), { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(out));
+    try {
+      fs.mkdirSync(DATA_FILE.replace(/[^/\\]+$/, ''), { recursive: true });
+      fs.writeFileSync(DATA_FILE, JSON.stringify(out));
+    } catch (e) {
+      // read-only filesystem (serverless): keep the generated history in memory for this instance
+      console.warn('[k17] could not cache the generated history:', e.message);
+      DATA = out;
+      return DATA;
+    }
   }
   DATA = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   return DATA;
